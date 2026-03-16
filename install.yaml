@@ -1,0 +1,15 @@
+name: ddev-coolify
+
+project_files:
+  - commands/host/coolify
+
+global_files: []
+
+pre_install_actions: []
+
+post_install_actions:
+  - chmod +x commands/host/coolify
+
+removal_actions: []
+
+yaml_read_files: {}

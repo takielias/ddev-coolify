@@ -1,0 +1,673 @@
+#!/usr/bin/env bash
+
+## Description: Generate a production Dockerfile for Coolify deployment (ServerSideUp)
+## Usage: coolify [flags]
+## Example: "ddev coolify\nddev coolify --server=frankenphp --supervisor\nddev coolify --dry-run"
+## Flags: [{"Name":"output","Shorthand":"o","Type":"string","DefValue":".","Usage":"output directory for generated files"},{"Name":"dry-run","Shorthand":"n","Usage":"preview what would be generated without writing files"},{"Name":"force","Shorthand":"f","Usage":"overwrite existing files without prompting"},{"Name":"server","Shorthand":"s","Type":"string","Usage":"web server: frankenphp or nginx (skips prompt)"},{"Name":"supervisor","Usage":"enable supervisor/S6 for single-container mode (skips prompt)"},{"Name":"no-supervisor","Usage":"disable supervisor for multi-container mode (skips prompt)"}]
+
+set -eo pipefail
+
+# ─── Colors ───────────────────────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+info()  { echo -e "${CYAN}→${NC} $*"; }
+ok()    { echo -e "${GREEN}✓${NC} $*"; }
+warn()  { echo -e "${YELLOW}⚠${NC} $*"; }
+err()   { echo -e "${RED}✗${NC} $*" >&2; }
+
+# ─── Helper functions ─────────────────────────────────────────────────────────
+_write_file() {
+    local filepath="$1"
+    local content="$2"
+    local filename
+    filename=$(basename "$filepath")
+
+    if [[ -f "${filepath}" ]] && [[ "${FORCE}" != "true" ]]; then
+        echo -en "${YELLOW}${filename} already exists. Overwrite? [y/N]${NC} "
+        read -r answer
+        if [[ "${answer}" != "y" && "${answer}" != "Y" ]]; then
+            warn "Skipped ${filename}"
+            return
+        fi
+    fi
+
+    mkdir -p "$(dirname "${filepath}")"
+    echo "${content}" > "${filepath}"
+    ok "Written ${filepath#${DDEV_APPROOT}/}"
+}
+
+_print_coolify_notes() {
+    echo -e "${BOLD}Coolify Setup:${NC}"
+    echo ""
+    echo "  1. Push docker/ folder to your repo"
+    echo "  2. In Coolify, create a new service from this repo"
+    echo "  3. Set Dockerfile location: docker/Dockerfile"
+    echo "  4. Set Build context: / (project root)"
+    echo ""
+
+    if [[ "${USE_SUPERVISOR}" == "true" ]]; then
+        local _server_label="FrankenPHP"
+        [[ "${SERVER}" == "nginx" ]] && _server_label="Nginx + PHP-FPM (S6)"
+
+        echo -e "  ${BOLD}Single container${NC} (${_server_label})"
+        echo "    Port mapping:  8080"
+        echo "    Health check:  /up"
+        echo "    Processes:     Web server"
+        if [[ "${HAS_HORIZON}" == "true" ]]; then
+            echo "                   Horizon (queue worker)"
+        fi
+        if [[ "${HAS_SCHEDULER}" == "true" ]]; then
+            echo "                   Scheduler (cron)"
+        fi
+    else
+        echo -e "  ${BOLD}App service${NC} (web server)"
+        echo "    Port mapping:  8080"
+        echo "    Health check:  /up"
+        if [[ "${HAS_HORIZON}" == "true" ]]; then
+            echo ""
+            echo -e "  ${BOLD}Worker service${NC} (same image, override command)"
+            echo "    Command:  php /var/www/html/artisan horizon"
+            echo "    Ports:    none"
+        fi
+        if [[ "${HAS_SCHEDULER}" == "true" ]]; then
+            echo ""
+            echo -e "  ${BOLD}Scheduler service${NC} (same image, override command)"
+            echo "    Command:  php /var/www/html/artisan schedule:work"
+            echo "    Ports:    none"
+        fi
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Shared resources${NC} (create once in Coolify, reuse across apps)"
+    echo "    ${DB_TYPE}:${DB_VERSION}  — one DB server, separate databases per app"
+    if [[ "${HAS_REDIS}" == "true" ]]; then
+        echo "    redis:alpine   — one Redis, separate DB numbers per app (REDIS_DB=0, 1, 2...)"
+    fi
+    echo ""
+    echo -e "  ${BOLD}Environment variables${NC} — inject in Coolify UI (never bake into image):"
+    echo "    APP_KEY, APP_URL, DB_HOST, DB_DATABASE, DB_USERNAME, DB_PASSWORD"
+    if [[ "${HAS_REDIS}" == "true" ]]; then
+        echo "    REDIS_HOST, REDIS_DB=0, QUEUE_CONNECTION=redis, CACHE_STORE=redis, SESSION_DRIVER=redis"
+    fi
+    echo ""
+    echo -e "  ${BOLD}Local build:${NC}"
+    echo "    docker build -f docker/Dockerfile -t myapp ."
+    echo ""
+}
+
+# ─── Parse flags ──────────────────────────────────────────────────────────────
+OUTPUT_DIR="."
+DRY_RUN=false
+FORCE=false
+SERVER=""
+USE_SUPERVISOR=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -o|--output)         OUTPUT_DIR="$2"; shift 2 ;;
+        -n|--dry-run)        DRY_RUN=true; shift ;;
+        -f|--force)          FORCE=true; shift ;;
+        -s|--server)         SERVER="$2"; shift 2 ;;
+        --server=*)          SERVER="${1#*=}"; shift ;;
+        --supervisor)        USE_SUPERVISOR=true; shift ;;
+        --no-supervisor)     USE_SUPERVISOR=false; shift ;;
+        *)                   shift ;;
+    esac
+done
+
+# Resolve relative to project root
+if [[ "${OUTPUT_DIR}" != /* ]]; then
+    OUTPUT_DIR="${DDEV_APPROOT}/${OUTPUT_DIR}"
+fi
+
+# ─── Interactive prompts ─────────────────────────────────────────────────────
+echo ""
+if [[ -z "${SERVER}" ]]; then
+    echo -e "${BOLD}Web Server:${NC}"
+    echo -e "  ${GREEN}1)${NC} FrankenPHP  ${DIM}— single-process, Caddy built-in, modern${NC}"
+    echo -e "  ${GREEN}2)${NC} Nginx       ${DIM}— traditional nginx + php-fpm, S6 overlay${NC}"
+    echo ""
+    echo -en "${CYAN}Choose [1/2]:${NC} "
+    read -r _server_choice
+    case "${_server_choice}" in
+        2|nginx|Nginx|NGINX)   SERVER="nginx" ;;
+        *)                     SERVER="frankenphp" ;;
+    esac
+fi
+
+echo ""
+if [[ -z "${USE_SUPERVISOR}" ]]; then
+    if [[ "${SERVER}" == "nginx" ]]; then
+        echo -e "${BOLD}Process Management:${NC}"
+        echo -e "  ${GREEN}y)${NC} Single container  ${DIM}— S6 overlay manages nginx + fpm + horizon + scheduler${NC}"
+        echo -e "  ${GREEN}n)${NC} Multi container    ${DIM}— separate services in Coolify for worker + scheduler${NC}"
+    else
+        echo -e "${BOLD}Process Management:${NC}"
+        echo -e "  ${GREEN}y)${NC} Single container  ${DIM}— Supervisor manages FrankenPHP + horizon + scheduler${NC}"
+        echo -e "  ${GREEN}n)${NC} Multi container    ${DIM}— separate services in Coolify for worker + scheduler${NC}"
+    fi
+    echo ""
+    echo -en "${CYAN}Enable single-container mode? [Y/n]:${NC} "
+    read -r _supervisor_choice
+    case "${_supervisor_choice}" in
+        n|N|no|No|NO)  USE_SUPERVISOR=false ;;
+        *)             USE_SUPERVISOR=true ;;
+    esac
+fi
+
+echo ""
+echo -e "  Server:     ${GREEN}${SERVER}${NC}"
+echo -e "  Mode:       ${GREEN}$(if [[ "${USE_SUPERVISOR}" == "true" ]]; then echo "single container"; else echo "multi container"; fi)${NC}"
+
+# ─── Detect configuration ────────────────────────────────────────────────────
+echo ""
+info "Reading DDEV configuration..."
+
+PHP_VERSION="${DDEV_PHP_VERSION:-8.4}"
+DB_INFO="${DDEV_DATABASE:-mysql:8.4}"
+DB_TYPE="${DB_INFO%%:*}"
+DB_VERSION="${DB_INFO##*:}"
+PROJECT_TYPE="${DDEV_PROJECT_TYPE:-laravel}"
+
+# Node version: check .nvmrc → package.json engines → default 22
+NODE_VERSION="22"
+if [[ -f "${DDEV_APPROOT}/.nvmrc" ]]; then
+    NODE_VERSION=$(tr -d '[:space:]' < "${DDEV_APPROOT}/.nvmrc" | sed 's/^v//')
+elif [[ -f "${DDEV_APPROOT}/package.json" ]]; then
+    _node_ver=$(grep -o '"node"[[:space:]]*:[[:space:]]*"[^"]*"' "${DDEV_APPROOT}/package.json" 2>/dev/null | grep -o '[0-9][0-9.]*' | head -1 || true)
+    [[ -n "${_node_ver}" ]] && NODE_VERSION="${_node_ver}"
+fi
+
+echo -e "  PHP:        ${GREEN}${PHP_VERSION}${NC}"
+echo -e "  Database:   ${GREEN}${DB_TYPE} ${DB_VERSION}${NC}"
+echo -e "  Node:       ${GREEN}${NODE_VERSION}${NC}"
+echo ""
+
+# ─── Detect PHP extensions from composer.json ─────────────────────────────────
+info "Scanning composer.json for PHP extension requirements..."
+
+COMPOSER_FILE="${DDEV_APPROOT}/composer.json"
+EXTENSIONS=()
+
+declare -A PKG_EXT_MAP=(
+    ["spatie/laravel-medialibrary"]="exif gd"
+    ["barryvdh/laravel-dompdf"]="gd"
+    ["intervention/image"]="gd"
+    ["milon/barcode"]="gd"
+    ["phpoffice/phpspreadsheet"]="gd"
+    ["maatwebsite/excel"]="gd"
+    ["moneyphp/money"]="intl bcmath"
+    ["laravel/cashier"]="intl bcmath"
+    ["spatie/laravel-translatable"]="intl"
+    ["mcamara/laravel-localization"]="intl"
+    ["ext-intl"]="intl"
+    ["ext-gd"]="gd"
+    ["ext-exif"]="exif"
+    ["ext-bcmath"]="bcmath"
+    ["ext-imagick"]="imagick"
+    ["ext-soap"]="soap"
+    ["ext-imap"]="imap"
+)
+
+if [[ -f "${COMPOSER_FILE}" ]]; then
+    for pkg in "${!PKG_EXT_MAP[@]}"; do
+        if grep -q "\"${pkg}\"" "${COMPOSER_FILE}" 2>/dev/null; then
+            for ext in ${PKG_EXT_MAP[$pkg]}; do
+                EXTENSIONS+=("$ext")
+            done
+        fi
+    done
+fi
+
+if [[ ${#EXTENSIONS[@]} -gt 0 ]]; then
+    mapfile -t EXTENSIONS < <(printf '%s\n' "${EXTENSIONS[@]}" | sort -u)
+    echo -e "  Extensions: ${GREEN}${EXTENSIONS[*]}${NC}"
+else
+    echo -e "  Extensions: ${GREEN}(none beyond defaults)${NC}"
+fi
+
+# ─── Detect services ─────────────────────────────────────────────────────────
+HAS_HORIZON=false
+HAS_SCHEDULER=false
+HAS_REDIS=false
+
+if grep -q '"laravel/horizon"' "${COMPOSER_FILE}" 2>/dev/null; then
+    HAS_HORIZON=true
+    HAS_REDIS=true
+fi
+
+if [[ -d "${DDEV_APPROOT}/app/Console" ]] || grep -rq "schedule" "${DDEV_APPROOT}/routes/console.php" 2>/dev/null; then
+    HAS_SCHEDULER=true
+fi
+
+if grep -qE "^(CACHE_STORE|SESSION_DRIVER|QUEUE_CONNECTION)=redis" "${DDEV_APPROOT}/.env.example" 2>/dev/null; then
+    HAS_REDIS=true
+fi
+
+echo ""
+echo -e "${BOLD}Detected Services:${NC}"
+echo -e "  Horizon (worker): ${HAS_HORIZON}"
+echo -e "  Scheduler:        ${HAS_SCHEDULER}"
+echo -e "  Redis:            ${HAS_REDIS}"
+
+# ─── Detect web-build customizations ─────────────────────────────────────────
+WEB_BUILD_FILE="${DDEV_APPROOT}/.ddev/web-build/Dockerfile"
+WEB_BUILD_COMMANDS=""
+if [[ -f "${WEB_BUILD_FILE}" ]]; then
+    WEB_BUILD_COMMANDS=$(grep -v '^\s*#' "${WEB_BUILD_FILE}" | grep -v '^\s*$' | grep -v 'ddev-generated' || true)
+fi
+
+if [[ -n "${WEB_BUILD_COMMANDS}" ]]; then
+    echo -e "  ${YELLOW}Found .ddev/web-build/Dockerfile customizations — will include${NC}"
+fi
+
+# ─── Determine base image ────────────────────────────────────────────────────
+if [[ "${SERVER}" == "nginx" ]]; then
+    BASE_IMAGE="serversideup/php:${PHP_VERSION}-fpm-nginx"
+else
+    BASE_IMAGE="serversideup/php:${PHP_VERSION}-frankenphp"
+fi
+
+# ─── Generate .dockerignore ──────────────────────────────────────────────────
+DOCKERIGNORE_CONTENT="# Generated by ddev coolify — $(date +%Y-%m-%d)
+
+# ─── Version control & IDE ────────────────────────────────────────────────────
+.git/
+.gitattributes
+.editorconfig
+.idea/
+.vscode/
+.claude/
+.agents/
+.serena/
+.junie/
+
+# ─── DDEV ─────────────────────────────────────────────────────────────────────
+.ddev/
+
+# ─── Dependencies (rebuilt in build stages) ───────────────────────────────────
+node_modules/
+vendor/
+
+# ─── Build artifacts ──────────────────────────────────────────────────────────
+public/build/
+public/hot
+dist/
+
+# ─── Storage (runtime volumes, not baked in) ──────────────────────────────────
+storage/logs/*
+storage/pail/
+storage/framework/cache/data/*
+storage/framework/sessions/*
+storage/framework/views/*
+storage/app/public/*
+
+# ─── Tests & QA ───────────────────────────────────────────────────────────────
+tests/
+e2e/
+playwright-report/
+test-results/
+playwright.config.*
+phpstan.neon*
+phpunit.xml*
+rector.php
+pint.json
+.phpunit.result.cache
+
+# ─── Frontend tooling (only needed in build stage) ───────────────────────────
+eslint.config.*
+prettier.config.*
+auto-imports.d.ts
+components.d.ts
+
+# ─── Documentation & planning ────────────────────────────────────────────────
+Plan/
+*.md
+!README.md
+
+# ─── Environment & Docker ────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+Dockerfile
+.dockerignore
+docker-compose*.yml"
+
+# ─── Generate process management files ────────────────────────────────────────
+STARTUP_CONTENT=""
+SUPERVISOR_CONTENT=""
+S6_HORIZON_RUN=""
+S6_HORIZON_TYPE=""
+S6_SCHEDULER_RUN=""
+S6_SCHEDULER_TYPE=""
+
+if [[ "${USE_SUPERVISOR}" == "true" ]]; then
+    if [[ "${SERVER}" == "nginx" ]]; then
+        # ── Nginx: use S6 overlay (built-in) ──────────────────────────────
+        if [[ "${HAS_HORIZON}" == "true" ]]; then
+            S6_HORIZON_RUN='#!/command/execlineb -P
+foreground { s6-sleep 5 }
+php /var/www/html/artisan horizon'
+            S6_HORIZON_TYPE="longrun"
+        fi
+
+        if [[ "${HAS_SCHEDULER}" == "true" ]]; then
+            S6_SCHEDULER_RUN='#!/command/execlineb -P
+foreground { s6-sleep 5 }
+php /var/www/html/artisan schedule:work'
+            S6_SCHEDULER_TYPE="longrun"
+        fi
+    else
+        # ── FrankenPHP: use Supervisor ────────────────────────────────────
+        STARTUP_CONTENT='#!/bin/sh
+set -e
+
+# Run ServerSideUp entrypoint scripts (container info, SSL, Laravel automations)
+if [ -d /etc/entrypoint.d ]; then
+    for script in /etc/entrypoint.d/*.sh; do
+        if [ -x "$script" ]; then
+            echo "▶ Running $(basename $script)..."
+            "$script" || true
+        fi
+    done
+fi
+
+echo "🚀 Starting Supervisor (FrankenPHP + workers)..."
+exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf'
+
+        SUPERVISOR_CONTENT="[supervisord]
+nodaemon=true
+logfile=/dev/stdout
+logfile_maxbytes=0
+pidfile=/tmp/supervisord.pid
+
+[program:frankenphp]
+command=frankenphp run --config /etc/frankenphp/Caddyfile --adapter caddyfile
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/stderr
+stderr_logfile_maxbytes=0
+autorestart=true
+priority=10"
+
+        if [[ "${HAS_HORIZON}" == "true" ]]; then
+            SUPERVISOR_CONTENT="${SUPERVISOR_CONTENT}
+
+[program:horizon]
+command=php /var/www/html/artisan horizon
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/stderr
+stderr_logfile_maxbytes=0
+autorestart=true
+priority=20
+startsecs=5
+stopwaitsecs=30
+stopsignal=SIGTERM"
+        fi
+
+        if [[ "${HAS_SCHEDULER}" == "true" ]]; then
+            SUPERVISOR_CONTENT="${SUPERVISOR_CONTENT}
+
+[program:scheduler]
+command=php /var/www/html/artisan schedule:work
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/stderr
+stderr_logfile_maxbytes=0
+autorestart=true
+priority=20
+startsecs=5"
+        fi
+    fi
+fi
+
+# ─── Generate Dockerfile ─────────────────────────────────────────────────────
+EXTENSIONS_LINE=""
+if [[ ${#EXTENSIONS[@]} -gt 0 ]]; then
+    EXTENSIONS_LINE="RUN install-php-extensions ${EXTENSIONS[*]}"
+fi
+
+WEB_BUILD_SECTION=""
+if [[ -n "${WEB_BUILD_COMMANDS}" ]]; then
+    WEB_BUILD_SECTION="
+# Carried over from .ddev/web-build/Dockerfile
+${WEB_BUILD_COMMANDS}
+"
+fi
+
+# ── Build the root install section ────────────────────────────────────────────
+ROOT_INSTALL=""
+if [[ "${USE_SUPERVISOR}" == "true" && "${SERVER}" == "frankenphp" ]]; then
+    ROOT_INSTALL="
+# Install supervisor for process management
+RUN apt-get update \\
+    && apt-get install -y --no-install-recommends supervisor \\
+    && rm -rf /var/lib/apt/lists/*"
+fi
+
+# ── Build the process config section ──────────────────────────────────────────
+PROCESS_CONFIG=""
+if [[ "${USE_SUPERVISOR}" == "true" ]]; then
+    if [[ "${SERVER}" == "frankenphp" ]]; then
+        PROCESS_CONFIG="
+# Copy supervisor configuration and startup script
+COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+COPY --chmod=755 docker/start.sh /usr/local/bin/start.sh"
+    elif [[ "${SERVER}" == "nginx" ]]; then
+        if [[ "${HAS_HORIZON}" == "true" ]]; then
+            PROCESS_CONFIG="${PROCESS_CONFIG}
+
+# S6 service: Horizon (queue worker)
+COPY --chmod=755 docker/s6/horizon/run /etc/s6-overlay/s6-rc.d/horizon/run
+COPY docker/s6/horizon/type /etc/s6-overlay/s6-rc.d/horizon/type
+RUN touch /etc/s6-overlay/s6-rc.d/user/contents.d/horizon"
+        fi
+        if [[ "${HAS_SCHEDULER}" == "true" ]]; then
+            PROCESS_CONFIG="${PROCESS_CONFIG}
+
+# S6 service: Scheduler
+COPY --chmod=755 docker/s6/scheduler/run /etc/s6-overlay/s6-rc.d/scheduler/run
+COPY docker/s6/scheduler/type /etc/s6-overlay/s6-rc.d/scheduler/type
+RUN touch /etc/s6-overlay/s6-rc.d/user/contents.d/scheduler"
+        fi
+    fi
+fi
+
+# ── Build the CMD line ────────────────────────────────────────────────────────
+CMD_LINE=""
+if [[ "${USE_SUPERVISOR}" == "true" && "${SERVER}" == "frankenphp" ]]; then
+    CMD_LINE='
+# Start: runs entrypoint scripts (AUTORUN) then supervisor (FrankenPHP + workers)
+CMD ["/usr/local/bin/start.sh"]'
+fi
+# nginx uses default CMD (S6 manages everything), frankenphp without supervisor uses default CMD too
+
+# ── Build server-specific ENV section ─────────────────────────────────────────
+SERVER_ENV=""
+if [[ "${SERVER}" == "frankenphp" ]]; then
+    SERVER_ENV="# FrankenPHP / Caddy
+ENV CADDY_SERVER_ROOT=\"/var/www/html/public\"
+ENV CADDY_HTTP_PORT=\"8080\"
+ENV CADDY_HTTPS_PORT=\"8443\"
+ENV SSL_MODE=\"off\"
+ENV HEALTHCHECK_PATH=\"/up\""
+else
+    SERVER_ENV="# Nginx
+ENV SSL_MODE=\"off\"
+ENV HEALTHCHECK_PATH=\"/up\""
+fi
+
+# ── Header comment ────────────────────────────────────────────────────────────
+if [[ "${SERVER}" == "nginx" ]]; then
+    HEADER_COMMENT="# PHP ${PHP_VERSION} | Nginx + PHP-FPM | ServerSideUp"
+else
+    HEADER_COMMENT="# PHP ${PHP_VERSION} | FrankenPHP | ServerSideUp"
+fi
+
+if [[ "${USE_SUPERVISOR}" == "true" ]]; then
+    if [[ "${SERVER}" == "nginx" ]]; then
+        HEADER_COMMENT="${HEADER_COMMENT}
+# Single container: S6 manages nginx + fpm + horizon + scheduler"
+    else
+        HEADER_COMMENT="${HEADER_COMMENT}
+# Single container: Supervisor manages FrankenPHP + horizon + scheduler"
+    fi
+else
+    HEADER_COMMENT="${HEADER_COMMENT}
+# Multi container: deploy separate services for worker + scheduler in Coolify"
+fi
+
+DOCKERFILE_CONTENT="# Generated by ddev coolify — $(date +%Y-%m-%d)
+${HEADER_COMMENT}
+
+# ─── Stage 1: Frontend build ─────────────────────────────────────────────────
+FROM node:${NODE_VERSION}-alpine AS frontend
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci --frozen-lockfile
+
+COPY . .
+RUN SKIP_WAYFINDER=1 npm run build
+
+# ─── Stage 2: PHP dependencies ───────────────────────────────────────────────
+FROM composer:2 AS vendor
+
+WORKDIR /app
+
+COPY composer.json composer.lock ./
+RUN composer install \\
+    --no-dev \\
+    --no-scripts \\
+    --no-autoloader \\
+    --prefer-dist \\
+    --ignore-platform-reqs
+
+COPY . .
+RUN composer dump-autoload --optimize --no-scripts
+
+# ─── Stage 3: Production image ───────────────────────────────────────────────
+FROM ${BASE_IMAGE} AS production
+
+LABEL org.opencontainers.image.source=\"https://github.com/OWNER/REPO\"
+LABEL org.opencontainers.image.description=\"Power POS — Production\"
+
+USER root
+${ROOT_INSTALL}
+${EXTENSIONS_LINE:+
+${EXTENSIONS_LINE}}${WEB_BUILD_SECTION}${PROCESS_CONFIG}
+
+USER www-data
+
+# Copy only what Laravel needs at runtime
+COPY --chown=www-data:www-data app/             /var/www/html/app/
+COPY --chown=www-data:www-data bootstrap/app.php /var/www/html/bootstrap/app.php
+COPY --chown=www-data:www-data bootstrap/providers.php /var/www/html/bootstrap/providers.php
+RUN mkdir -p /var/www/html/bootstrap/cache && chown www-data:www-data /var/www/html/bootstrap/cache
+COPY --chown=www-data:www-data config/          /var/www/html/config/
+COPY --chown=www-data:www-data database/        /var/www/html/database/
+COPY --chown=www-data:www-data public/          /var/www/html/public/
+COPY --chown=www-data:www-data resources/views/ /var/www/html/resources/views/
+COPY --chown=www-data:www-data routes/          /var/www/html/routes/
+COPY --chown=www-data:www-data storage/         /var/www/html/storage/
+COPY --chown=www-data:www-data artisan composer.json composer.lock /var/www/html/
+
+# Copy PHP dependencies from vendor stage
+COPY --from=vendor --chown=www-data:www-data /app/vendor /var/www/html/vendor
+
+# Copy built frontend assets from frontend stage
+COPY --from=frontend --chown=www-data:www-data /app/public/build /var/www/html/public/build
+
+# ─── Runtime configuration ────────────────────────────────────────────────────
+${SERVER_ENV}
+
+# PHP tuning
+ENV PHP_OPCACHE_ENABLE=\"1\"
+ENV PHP_MEMORY_LIMIT=\"256M\"
+ENV PHP_MAX_EXECUTION_TIME=\"60\"
+
+# Laravel AUTORUN (runs on container start)
+ENV AUTORUN_ENABLED=\"true\"
+ENV AUTORUN_LARAVEL_MIGRATION=\"true\"
+ENV AUTORUN_LARAVEL_STORAGE_LINK=\"true\"
+ENV AUTORUN_LARAVEL_CONFIG_CACHE=\"true\"
+ENV AUTORUN_LARAVEL_ROUTE_CACHE=\"true\"
+ENV AUTORUN_LARAVEL_VIEW_CACHE=\"true\"
+ENV AUTORUN_LARAVEL_EVENT_CACHE=\"true\"
+
+EXPOSE 8080
+${CMD_LINE}"
+
+# ─── Preview or write ─────────────────────────────────────────────────────────
+echo ""
+
+if [[ "${DRY_RUN}" == "true" ]]; then
+    echo -e "${BOLD}═══ Dockerfile (dry run) ═══${NC}"
+    echo "${DOCKERFILE_CONTENT}"
+
+    if [[ -n "${STARTUP_CONTENT}" ]]; then
+        echo ""
+        echo -e "${BOLD}═══ docker/start.sh (dry run) ═══${NC}"
+        echo "${STARTUP_CONTENT}"
+    fi
+
+    if [[ -n "${SUPERVISOR_CONTENT}" ]]; then
+        echo ""
+        echo -e "${BOLD}═══ docker/supervisord.conf (dry run) ═══${NC}"
+        echo "${SUPERVISOR_CONTENT}"
+    fi
+
+    if [[ -n "${S6_HORIZON_RUN}" ]]; then
+        echo ""
+        echo -e "${BOLD}═══ docker/s6/horizon/run (dry run) ═══${NC}"
+        echo "${S6_HORIZON_RUN}"
+    fi
+
+    if [[ -n "${S6_SCHEDULER_RUN}" ]]; then
+        echo ""
+        echo -e "${BOLD}═══ docker/s6/scheduler/run (dry run) ═══${NC}"
+        echo "${S6_SCHEDULER_RUN}"
+    fi
+
+    echo ""
+    echo -e "${BOLD}═══ .dockerignore (dry run) ═══${NC}"
+    echo "${DOCKERIGNORE_CONTENT}"
+    echo ""
+    echo -e "${BOLD}═══ Coolify deployment notes ═══${NC}"
+    _print_coolify_notes
+    exit 0
+fi
+
+# Write files
+_write_file "${OUTPUT_DIR}/docker/Dockerfile" "${DOCKERFILE_CONTENT}"
+_write_file "${OUTPUT_DIR}/docker/.dockerignore" "${DOCKERIGNORE_CONTENT}"
+
+if [[ -n "${STARTUP_CONTENT}" ]]; then
+    _write_file "${OUTPUT_DIR}/docker/start.sh" "${STARTUP_CONTENT}"
+fi
+
+if [[ -n "${SUPERVISOR_CONTENT}" ]]; then
+    _write_file "${OUTPUT_DIR}/docker/supervisord.conf" "${SUPERVISOR_CONTENT}"
+fi
+
+if [[ -n "${S6_HORIZON_RUN}" ]]; then
+    _write_file "${OUTPUT_DIR}/docker/s6/horizon/run" "${S6_HORIZON_RUN}"
+    _write_file "${OUTPUT_DIR}/docker/s6/horizon/type" "${S6_HORIZON_TYPE}"
+fi
+
+if [[ -n "${S6_SCHEDULER_RUN}" ]]; then
+    _write_file "${OUTPUT_DIR}/docker/s6/scheduler/run" "${S6_SCHEDULER_RUN}"
+    _write_file "${OUTPUT_DIR}/docker/s6/scheduler/type" "${S6_SCHEDULER_TYPE}"
+fi
+
+echo ""
+_print_coolify_notes
+echo -e "${GREEN}${BOLD}Done!${NC} Files generated in ${OUTPUT_DIR#${DDEV_APPROOT}/}"
