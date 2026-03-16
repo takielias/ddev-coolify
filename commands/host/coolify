@@ -145,19 +145,19 @@ echo ""
 if [[ -z "${USE_SUPERVISOR}" ]]; then
     if [[ "${SERVER}" == "nginx" ]]; then
         echo -e "${BOLD}Process Management:${NC}"
-        echo -e "  ${GREEN}y)${NC} Single container  ${DIM}— S6 overlay manages nginx + fpm + horizon + scheduler${NC}"
-        echo -e "  ${GREEN}n)${NC} Multi container    ${DIM}— separate services in Coolify for worker + scheduler${NC}"
+        echo -e "  ${GREEN}1)${NC} Single container  ${DIM}— S6 overlay manages nginx + fpm + horizon + scheduler${NC}"
+        echo -e "  ${GREEN}2)${NC} Multi container    ${DIM}— separate services in Coolify for worker + scheduler${NC}"
     else
         echo -e "${BOLD}Process Management:${NC}"
-        echo -e "  ${GREEN}y)${NC} Single container  ${DIM}— Supervisor manages FrankenPHP + horizon + scheduler${NC}"
-        echo -e "  ${GREEN}n)${NC} Multi container    ${DIM}— separate services in Coolify for worker + scheduler${NC}"
+        echo -e "  ${GREEN}1)${NC} Single container  ${DIM}— Supervisor manages FrankenPHP + horizon + scheduler${NC}"
+        echo -e "  ${GREEN}2)${NC} Multi container    ${DIM}— separate services in Coolify for worker + scheduler${NC}"
     fi
     echo ""
-    echo -en "${CYAN}Enable single-container mode? [Y/n]:${NC} "
+    echo -en "${CYAN}Choose [1/2]:${NC} "
     read -r _supervisor_choice
     case "${_supervisor_choice}" in
-        n|N|no|No|NO)  USE_SUPERVISOR=false ;;
-        *)             USE_SUPERVISOR=true ;;
+        2|n|N|no|multi)  USE_SUPERVISOR=false ;;
+        *)               USE_SUPERVISOR=true ;;
     esac
 fi
 
