@@ -405,27 +405,43 @@ echo "🚀 Starting Supervisor (FrankenPHP + workers)..."
 SUPERVISORD_PID=$!
 
 # Wait for supervisord socket to be ready
-sleep 2
+RETRIES=0
+while [ $RETRIES -lt 30 ]; do
+    if supervisorctl -c /etc/supervisor/conf.d/supervisord.conf status >/dev/null 2>&1; then
+        break
+    fi
+    RETRIES=$((RETRIES + 1))
+    sleep 1
+done
 
 # Start optional workers based on environment variables
 if [ "${ENABLE_HORIZON:-false}" = "true" ]; then
     echo "▶ Starting Horizon (ENABLE_HORIZON=true)..."
-    supervisorctl start horizon || true
+    supervisorctl -c /etc/supervisor/conf.d/supervisord.conf start horizon || true
 fi
 
 if [ "${ENABLE_SCHEDULER:-false}" = "true" ]; then
     echo "▶ Starting Scheduler (ENABLE_SCHEDULER=true)..."
-    supervisorctl start scheduler || true
+    supervisorctl -c /etc/supervisor/conf.d/supervisord.conf start scheduler || true
 fi
 
 # Wait for supervisord to exit
 wait $SUPERVISORD_PID'
 
-        SUPERVISOR_CONTENT="[supervisord]
+        SUPERVISOR_CONTENT="[unix_http_server]
+file=/tmp/supervisor.sock
+
+[supervisord]
 nodaemon=true
 logfile=/dev/stdout
 logfile_maxbytes=0
 pidfile=/tmp/supervisord.pid
+
+[rpcinterface:supervisor]
+supervisor.rpcinterface_factory = supervisor.rpcinterface:make_main_rpcinterface
+
+[supervisorctl]
+serverurl=unix:///tmp/supervisor.sock
 
 [program:frankenphp]
 command=frankenphp run --config /etc/frankenphp/Caddyfile --adapter caddyfile
