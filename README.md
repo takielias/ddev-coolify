@@ -50,9 +50,11 @@ ddev coolify --server=nginx --no-supervisor
 - Generates multi-stage Dockerfile (Node build -> Composer -> Production image)
 - Auto-detects PHP version, database, Node version from DDEV config
 - Auto-detects PHP extensions from `composer.json` dependencies
-- Auto-detects Horizon, Scheduler, Redis requirements
+- Auto-detects Horizon, Scheduler, Redis, and Wayfinder requirements
+- Auto-generates Wayfinder routes/actions in a dedicated build stage when `laravel/wayfinder` is detected
 - Carries over `.ddev/web-build/Dockerfile` customizations
 - Interactive prompts with flag overrides for CI/scripting
+- Env-based runtime toggles for Horizon and Scheduler (`ENABLE_HORIZON`, `ENABLE_SCHEDULER`)
 
 ### Web Server Options
 
@@ -68,14 +70,23 @@ ddev coolify --server=nginx --no-supervisor
 | **Single container** | Web + Horizon + Scheduler in one container |
 | **Multi container** | Separate Coolify services for worker + scheduler |
 
-## Generated Files
+### Runtime Worker Toggles
 
-All files are generated in the `docker/` directory:
+When using single-container mode, Horizon and Scheduler are **disabled by default** and controlled via environment variables. This prevents crash-loops when Redis isn't configured.
+
+| Variable | Default | Description |
+|---|---|---|
+| `ENABLE_HORIZON` | `false` | Set to `true` to start Horizon (requires Redis) |
+| `ENABLE_SCHEDULER` | `false` | Set to `true` to start the Laravel Scheduler |
+
+Set these in the Coolify UI under Environment Variables.
+
+## Generated Files
 
 | File | When |
 |---|---|
 | `docker/Dockerfile` | Always |
-| `docker/.dockerignore` | Always |
+| `.dockerignore` | Always (project root) |
 | `docker/start.sh` | FrankenPHP + Supervisor |
 | `docker/supervisord.conf` | FrankenPHP + Supervisor |
 | `docker/s6/horizon/run` | Nginx + S6 + Horizon detected |
@@ -85,12 +96,15 @@ All files are generated in the `docker/` directory:
 
 ## Coolify Setup
 
-1. Push `docker/` folder to your repo
+1. Push `docker/` folder and `.dockerignore` to your repo
 2. In Coolify, create a new service from your repo
 3. Set **Dockerfile location**: `docker/Dockerfile`
 4. Set **Build context**: `/` (project root)
 5. Set **Port**: `8080`
-6. Add environment variables (APP_KEY, DB_HOST, etc.)
+6. Add environment variables:
+   - `APP_KEY`, `APP_URL`, `DB_HOST`, `DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD`
+   - `REDIS_HOST`, `REDIS_DB` (if using Redis)
+   - `ENABLE_HORIZON=true`, `ENABLE_SCHEDULER=true` (if using single-container mode with workers)
 
 ## Auto-detected PHP Extensions
 
@@ -120,6 +134,7 @@ docker build -f docker/Dockerfile -t myapp .
 docker run --rm -p 8080:8080 --network ddev-PROJECTNAME_default \
   -e APP_KEY=... -e DB_HOST=ddev-PROJECTNAME-db \
   -e DB_DATABASE=db -e DB_USERNAME=db -e DB_PASSWORD=db \
+  -e ENABLE_HORIZON=true -e ENABLE_SCHEDULER=true \
   myapp
 ```
 

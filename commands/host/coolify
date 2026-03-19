@@ -45,7 +45,7 @@ _write_file() {
 _print_coolify_notes() {
     echo -e "${BOLD}Coolify Setup:${NC}"
     echo ""
-    echo "  1. Push docker/ folder to your repo"
+    echo "  1. Push docker/ folder and .dockerignore to your repo"
     echo "  2. In Coolify, create a new service from this repo"
     echo "  3. Set Dockerfile location: docker/Dockerfile"
     echo "  4. Set Build context: / (project root)"
@@ -60,10 +60,10 @@ _print_coolify_notes() {
         echo "    Health check:  /up"
         echo "    Processes:     Web server"
         if [[ "${HAS_HORIZON}" == "true" ]]; then
-            echo "                   Horizon (queue worker)"
+            echo "                   Horizon (queue worker) — requires ENABLE_HORIZON=true"
         fi
         if [[ "${HAS_SCHEDULER}" == "true" ]]; then
-            echo "                   Scheduler (cron)"
+            echo "                   Scheduler (cron) — requires ENABLE_SCHEDULER=true"
         fi
     else
         echo -e "  ${BOLD}App service${NC} (web server)"
@@ -94,6 +94,14 @@ _print_coolify_notes() {
     echo "    APP_KEY, APP_URL, DB_HOST, DB_DATABASE, DB_USERNAME, DB_PASSWORD"
     if [[ "${HAS_REDIS}" == "true" ]]; then
         echo "    REDIS_HOST, REDIS_DB=0, QUEUE_CONNECTION=redis, CACHE_STORE=redis, SESSION_DRIVER=redis"
+    fi
+    if [[ "${USE_SUPERVISOR}" == "true" ]]; then
+        if [[ "${HAS_HORIZON}" == "true" ]]; then
+            echo "    ENABLE_HORIZON=true   — disabled by default, requires Redis"
+        fi
+        if [[ "${HAS_SCHEDULER}" == "true" ]]; then
+            echo "    ENABLE_SCHEDULER=true — disabled by default"
+        fi
     fi
     echo ""
     echo -e "  ${BOLD}Local build:${NC}"
@@ -250,11 +258,17 @@ if grep -qE "^(CACHE_STORE|SESSION_DRIVER|QUEUE_CONNECTION)=redis" "${DDEV_APPRO
     HAS_REDIS=true
 fi
 
+HAS_WAYFINDER=false
+if grep -q '"laravel/wayfinder"' "${COMPOSER_FILE}" 2>/dev/null; then
+    HAS_WAYFINDER=true
+fi
+
 echo ""
 echo -e "${BOLD}Detected Services:${NC}"
 echo -e "  Horizon (worker): ${HAS_HORIZON}"
 echo -e "  Scheduler:        ${HAS_SCHEDULER}"
 echo -e "  Redis:            ${HAS_REDIS}"
+echo -e "  Wayfinder:        ${HAS_WAYFINDER}"
 
 # ─── Detect web-build customizations ─────────────────────────────────────────
 WEB_BUILD_FILE="${DDEV_APPROOT}/.ddev/web-build/Dockerfile"
@@ -351,16 +365,24 @@ if [[ "${USE_SUPERVISOR}" == "true" ]]; then
     if [[ "${SERVER}" == "nginx" ]]; then
         # ── Nginx: use S6 overlay (built-in) ──────────────────────────────
         if [[ "${HAS_HORIZON}" == "true" ]]; then
-            S6_HORIZON_RUN='#!/command/execlineb -P
-foreground { s6-sleep 5 }
-php /var/www/html/artisan horizon'
+            S6_HORIZON_RUN='#!/bin/sh
+if [ "$ENABLE_HORIZON" != "true" ]; then
+    echo "Horizon disabled (set ENABLE_HORIZON=true to enable)"
+    exec sleep infinity
+fi
+sleep 5
+exec php /var/www/html/artisan horizon'
             S6_HORIZON_TYPE="longrun"
         fi
 
         if [[ "${HAS_SCHEDULER}" == "true" ]]; then
-            S6_SCHEDULER_RUN='#!/command/execlineb -P
-foreground { s6-sleep 5 }
-php /var/www/html/artisan schedule:work'
+            S6_SCHEDULER_RUN='#!/bin/sh
+if [ "$ENABLE_SCHEDULER" != "true" ]; then
+    echo "Scheduler disabled (set ENABLE_SCHEDULER=true to enable)"
+    exec sleep infinity
+fi
+sleep 5
+exec php /var/www/html/artisan schedule:work'
             S6_SCHEDULER_TYPE="longrun"
         fi
     else
@@ -379,7 +401,25 @@ if [ -d /etc/entrypoint.d ]; then
 fi
 
 echo "🚀 Starting Supervisor (FrankenPHP + workers)..."
-exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf'
+/usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf &
+SUPERVISORD_PID=$!
+
+# Wait for supervisord socket to be ready
+sleep 2
+
+# Start optional workers based on environment variables
+if [ "${ENABLE_HORIZON:-false}" = "true" ]; then
+    echo "▶ Starting Horizon (ENABLE_HORIZON=true)..."
+    supervisorctl start horizon || true
+fi
+
+if [ "${ENABLE_SCHEDULER:-false}" = "true" ]; then
+    echo "▶ Starting Scheduler (ENABLE_SCHEDULER=true)..."
+    supervisorctl start scheduler || true
+fi
+
+# Wait for supervisord to exit
+wait $SUPERVISORD_PID'
 
         SUPERVISOR_CONTENT="[supervisord]
 nodaemon=true
@@ -405,6 +445,7 @@ stdout_logfile=/dev/stdout
 stdout_logfile_maxbytes=0
 stderr_logfile=/dev/stderr
 stderr_logfile_maxbytes=0
+autostart=false
 autorestart=true
 priority=20
 startsecs=5
@@ -421,6 +462,7 @@ stdout_logfile=/dev/stdout
 stdout_logfile_maxbytes=0
 stderr_logfile=/dev/stderr
 stderr_logfile_maxbytes=0
+autostart=false
 autorestart=true
 priority=20
 startsecs=5"
@@ -524,10 +566,36 @@ else
 # Multi container: deploy separate services for worker + scheduler in Coolify"
 fi
 
+WAYFINDER_STAGE=""
+WAYFINDER_FRONTEND_COPY=""
+if [[ "${HAS_WAYFINDER}" == "true" ]]; then
+    WAYFINDER_STAGE="# ─── Stage 1: Wayfinder generation ──────────────────────────────────────────
+FROM composer:2 AS wayfinder
+
+WORKDIR /app
+
+COPY composer.json composer.lock ./
+RUN composer install \\
+    --no-scripts \\
+    --no-autoloader \\
+    --prefer-dist \\
+    --ignore-platform-reqs
+
+COPY . .
+RUN composer dump-autoload --no-scripts \\
+    && php artisan wayfinder:generate --no-interaction --with-form
+
+"
+    WAYFINDER_FRONTEND_COPY="COPY --from=wayfinder /app/resources/js/routes/ ./resources/js/routes/
+COPY --from=wayfinder /app/resources/js/actions/ ./resources/js/actions/
+COPY --from=wayfinder /app/resources/js/wayfinder/ ./resources/js/wayfinder/
+"
+fi
+
 DOCKERFILE_CONTENT="# Generated by ddev coolify — $(date +%Y-%m-%d)
 ${HEADER_COMMENT}
 
-# ─── Stage 1: Frontend build ─────────────────────────────────────────────────
+${WAYFINDER_STAGE}# ─── Stage: Frontend build ───────────────────────────────────────────────────
 FROM node:${NODE_VERSION}-alpine AS frontend
 
 WORKDIR /app
@@ -536,9 +604,9 @@ COPY package.json package-lock.json ./
 RUN npm ci --frozen-lockfile
 
 COPY . .
-RUN SKIP_WAYFINDER=1 npm run build
+${WAYFINDER_FRONTEND_COPY}RUN npm run build
 
-# ─── Stage 2: PHP dependencies ───────────────────────────────────────────────
+# ─── Stage: PHP dependencies ─────────────────────────────────────────────────
 FROM composer:2 AS vendor
 
 WORKDIR /app
@@ -554,7 +622,7 @@ RUN composer install \\
 COPY . .
 RUN composer dump-autoload --optimize --no-scripts
 
-# ─── Stage 3: Production image ───────────────────────────────────────────────
+# ─── Stage: Production image ─────────────────────────────────────────────────
 FROM ${BASE_IMAGE} AS production
 
 LABEL org.opencontainers.image.source=\"https://github.com/OWNER/REPO\"
@@ -648,7 +716,7 @@ fi
 
 # Write files
 _write_file "${OUTPUT_DIR}/docker/Dockerfile" "${DOCKERFILE_CONTENT}"
-_write_file "${OUTPUT_DIR}/docker/.dockerignore" "${DOCKERIGNORE_CONTENT}"
+_write_file "${OUTPUT_DIR}/.dockerignore" "${DOCKERIGNORE_CONTENT}"
 
 if [[ -n "${STARTUP_CONTENT}" ]]; then
     _write_file "${OUTPUT_DIR}/docker/start.sh" "${STARTUP_CONTENT}"

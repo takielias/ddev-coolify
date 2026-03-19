@@ -105,7 +105,7 @@ JSON
 
   # Verify generated files
   assert_file_exist docker/Dockerfile
-  assert_file_exist docker/.dockerignore
+  assert_file_exist .dockerignore
   assert_file_exist docker/start.sh
   assert_file_exist docker/supervisord.conf
 
@@ -183,7 +183,7 @@ JSON
 
   # Only Dockerfile and .dockerignore — no supervisor or s6 files
   assert_file_exist docker/Dockerfile
-  assert_file_exist docker/.dockerignore
+  assert_file_exist .dockerignore
   assert_file_not_exist docker/supervisord.conf
   assert_file_not_exist docker/start.sh
 
