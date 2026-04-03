@@ -61,6 +61,8 @@ _print_coolify_notes() {
         echo "    Processes:     Web server"
         if [[ "${HAS_HORIZON}" == "true" ]]; then
             echo "                   Horizon (queue worker) — requires ENABLE_HORIZON=true"
+        elif [[ "${HAS_QUEUE_WORKER}" == "true" ]]; then
+            echo "                   Queue worker — requires ENABLE_QUEUE_WORKER=true"
         fi
         if [[ "${HAS_SCHEDULER}" == "true" ]]; then
             echo "                   Scheduler (cron) — requires ENABLE_SCHEDULER=true"
@@ -73,6 +75,11 @@ _print_coolify_notes() {
             echo ""
             echo -e "  ${BOLD}Worker service${NC} (same image, override command)"
             echo "    Command:  php /var/www/html/artisan horizon"
+            echo "    Ports:    none"
+        elif [[ "${HAS_QUEUE_WORKER}" == "true" ]]; then
+            echo ""
+            echo -e "  ${BOLD}Worker service${NC} (same image, override command)"
+            echo "    Command:  php /var/www/html/artisan queue:work --sleep=3 --tries=3 --max-time=3600"
             echo "    Ports:    none"
         fi
         if [[ "${HAS_SCHEDULER}" == "true" ]]; then
@@ -97,10 +104,12 @@ _print_coolify_notes() {
     fi
     if [[ "${USE_SUPERVISOR}" == "true" ]]; then
         if [[ "${HAS_HORIZON}" == "true" ]]; then
-            echo "    ENABLE_HORIZON=true   — disabled by default, requires Redis"
+            echo "    ENABLE_HORIZON=true       — disabled by default, requires Redis"
+        elif [[ "${HAS_QUEUE_WORKER}" == "true" ]]; then
+            echo "    ENABLE_QUEUE_WORKER=true  — disabled by default"
         fi
         if [[ "${HAS_SCHEDULER}" == "true" ]]; then
-            echo "    ENABLE_SCHEDULER=true — disabled by default"
+            echo "    ENABLE_SCHEDULER=true     — disabled by default"
         fi
     fi
     echo ""
@@ -242,12 +251,22 @@ fi
 
 # ─── Detect services ─────────────────────────────────────────────────────────
 HAS_HORIZON=false
+HAS_QUEUE_WORKER=false
 HAS_SCHEDULER=false
 HAS_REDIS=false
 
 if grep -q '"laravel/horizon"' "${COMPOSER_FILE}" 2>/dev/null; then
     HAS_HORIZON=true
     HAS_REDIS=true
+fi
+
+# Detect queue usage: jobs directory, ShouldQueue implementations, or queue driver configured
+if [[ "${HAS_HORIZON}" != "true" ]]; then
+    if [[ -d "${DDEV_APPROOT}/app/Jobs" ]] \
+        || grep -rq "ShouldQueue" "${DDEV_APPROOT}/app/" 2>/dev/null \
+        || grep -qE "^QUEUE_CONNECTION=(redis|database|sqs|beanstalkd)" "${DDEV_APPROOT}/.env.example" 2>/dev/null; then
+        HAS_QUEUE_WORKER=true
+    fi
 fi
 
 if [[ -d "${DDEV_APPROOT}/app/Console" ]] || grep -rq "schedule" "${DDEV_APPROOT}/routes/console.php" 2>/dev/null; then
@@ -266,6 +285,7 @@ fi
 echo ""
 echo -e "${BOLD}Detected Services:${NC}"
 echo -e "  Horizon (worker): ${HAS_HORIZON}"
+echo -e "  Queue worker:     ${HAS_QUEUE_WORKER}"
 echo -e "  Scheduler:        ${HAS_SCHEDULER}"
 echo -e "  Redis:            ${HAS_REDIS}"
 echo -e "  Wayfinder:        ${HAS_WAYFINDER}"
@@ -358,6 +378,8 @@ STARTUP_CONTENT=""
 SUPERVISOR_CONTENT=""
 S6_HORIZON_RUN=""
 S6_HORIZON_TYPE=""
+S6_QUEUE_WORKER_RUN=""
+S6_QUEUE_WORKER_TYPE=""
 S6_SCHEDULER_RUN=""
 S6_SCHEDULER_TYPE=""
 
@@ -373,6 +395,15 @@ fi
 sleep 5
 exec php /var/www/html/artisan horizon'
             S6_HORIZON_TYPE="longrun"
+        elif [[ "${HAS_QUEUE_WORKER}" == "true" ]]; then
+            S6_QUEUE_WORKER_RUN='#!/bin/sh
+if [ "$ENABLE_QUEUE_WORKER" != "true" ]; then
+    echo "Queue worker disabled (set ENABLE_QUEUE_WORKER=true to enable)"
+    exec sleep infinity
+fi
+sleep 5
+exec php /var/www/html/artisan queue:work --sleep=3 --tries=3 --max-time=3600'
+            S6_QUEUE_WORKER_TYPE="longrun"
         fi
 
         if [[ "${HAS_SCHEDULER}" == "true" ]]; then
@@ -418,6 +449,11 @@ done
 if [ "${ENABLE_HORIZON:-false}" = "true" ]; then
     echo "▶ Starting Horizon (ENABLE_HORIZON=true)..."
     supervisorctl -c /etc/supervisor/conf.d/supervisord.conf start horizon || true
+fi
+
+if [ "${ENABLE_QUEUE_WORKER:-false}" = "true" ]; then
+    echo "▶ Starting Queue Worker (ENABLE_QUEUE_WORKER=true)..."
+    supervisorctl -c /etc/supervisor/conf.d/supervisord.conf start queue-worker || true
 fi
 
 if [ "${ENABLE_SCHEDULER:-false}" = "true" ]; then
@@ -467,6 +503,19 @@ priority=20
 startsecs=5
 stopwaitsecs=30
 stopsignal=SIGTERM"
+        elif [[ "${HAS_QUEUE_WORKER}" == "true" ]]; then
+            SUPERVISOR_CONTENT="${SUPERVISOR_CONTENT}
+
+[program:queue-worker]
+command=php /var/www/html/artisan queue:work --sleep=3 --tries=3 --max-time=3600
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+stderr_logfile=/dev/stderr
+stderr_logfile_maxbytes=0
+autostart=false
+autorestart=true
+priority=20
+startsecs=5"
         fi
 
         if [[ "${HAS_SCHEDULER}" == "true" ]]; then
@@ -540,6 +589,13 @@ COPY --chmod=755 docker/start.sh /usr/local/bin/start.sh"
 COPY --chmod=755 docker/s6/horizon/run /etc/s6-overlay/s6-rc.d/horizon/run
 COPY docker/s6/horizon/type /etc/s6-overlay/s6-rc.d/horizon/type
 RUN touch /etc/s6-overlay/s6-rc.d/user/contents.d/horizon"
+        elif [[ "${HAS_QUEUE_WORKER}" == "true" ]]; then
+            PROCESS_CONFIG="${PROCESS_CONFIG}
+
+# S6 service: Queue worker
+COPY --chmod=755 docker/s6/queue-worker/run /etc/s6-overlay/s6-rc.d/queue-worker/run
+COPY docker/s6/queue-worker/type /etc/s6-overlay/s6-rc.d/queue-worker/type
+RUN touch /etc/s6-overlay/s6-rc.d/user/contents.d/queue-worker"
         fi
         if [[ "${HAS_SCHEDULER}" == "true" ]]; then
             PROCESS_CONFIG="${PROCESS_CONFIG}
@@ -729,6 +785,12 @@ if [[ "${DRY_RUN}" == "true" ]]; then
         echo "${S6_HORIZON_RUN}"
     fi
 
+    if [[ -n "${S6_QUEUE_WORKER_RUN}" ]]; then
+        echo ""
+        echo -e "${BOLD}═══ docker/s6/queue-worker/run (dry run) ═══${NC}"
+        echo "${S6_QUEUE_WORKER_RUN}"
+    fi
+
     if [[ -n "${S6_SCHEDULER_RUN}" ]]; then
         echo ""
         echo -e "${BOLD}═══ docker/s6/scheduler/run (dry run) ═══${NC}"
@@ -759,6 +821,11 @@ fi
 if [[ -n "${S6_HORIZON_RUN}" ]]; then
     _write_file "${OUTPUT_DIR}/docker/s6/horizon/run" "${S6_HORIZON_RUN}"
     _write_file "${OUTPUT_DIR}/docker/s6/horizon/type" "${S6_HORIZON_TYPE}"
+fi
+
+if [[ -n "${S6_QUEUE_WORKER_RUN}" ]]; then
+    _write_file "${OUTPUT_DIR}/docker/s6/queue-worker/run" "${S6_QUEUE_WORKER_RUN}"
+    _write_file "${OUTPUT_DIR}/docker/s6/queue-worker/type" "${S6_QUEUE_WORKER_TYPE}"
 fi
 
 if [[ -n "${S6_SCHEDULER_RUN}" ]]; then
