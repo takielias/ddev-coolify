@@ -502,11 +502,25 @@ fi
 
 # ── Build the root install section ────────────────────────────────────────────
 ROOT_INSTALL=""
+
+# Collect apt packages needed at runtime
+APT_PACKAGES=()
 if [[ "${USE_SUPERVISOR}" == "true" && "${SERVER}" == "frankenphp" ]]; then
+    APT_PACKAGES+=(supervisor)
+fi
+
+# Include database client tools (mysqldump / pg_dump) for backups & debugging
+if [[ "${DB_TYPE}" == "mysql" || "${DB_TYPE}" == "mariadb" ]]; then
+    APT_PACKAGES+=(default-mysql-client)
+elif [[ "${DB_TYPE}" == "postgres" ]]; then
+    APT_PACKAGES+=(postgresql-client)
+fi
+
+if [[ ${#APT_PACKAGES[@]} -gt 0 ]]; then
     ROOT_INSTALL="
-# Install supervisor for process management
+# Install runtime apt packages (process manager, database client tools)
 RUN apt-get update \\
-    && apt-get install -y --no-install-recommends supervisor \\
+    && apt-get install -y --no-install-recommends ${APT_PACKAGES[*]} \\
     && rm -rf /var/lib/apt/lists/*"
 fi
 

@@ -51,6 +51,7 @@ ddev coolify --server=nginx --no-supervisor
 - Auto-detects PHP version, database, Node version from DDEV config
 - Auto-detects PHP extensions from `composer.json` dependencies
 - Auto-detects Horizon, Scheduler, Redis, and Wayfinder requirements
+- Includes database client tools (`mysqldump`/`pg_dump`) for backups and debugging
 - Auto-generates Wayfinder routes/actions in a dedicated build stage when `laravel/wayfinder` is detected
 - Carries over `.ddev/web-build/Dockerfile` customizations
 - Interactive prompts with flag overrides for CI/scripting
