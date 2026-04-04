@@ -221,6 +221,7 @@ declare -A PKG_EXT_MAP=(
     ["maatwebsite/excel"]="gd"
     ["moneyphp/money"]="intl bcmath"
     ["laravel/cashier"]="intl bcmath"
+    ["laravel/framework"]="intl"
     ["spatie/laravel-translatable"]="intl"
     ["mcamara/laravel-localization"]="intl"
     ["ext-intl"]="intl"
