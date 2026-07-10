@@ -55,7 +55,9 @@ ddev coolify --server=nginx --no-supervisor
 - Auto-generates Wayfinder routes/actions in a dedicated build stage when `laravel/wayfinder` is detected
 - Carries over `.ddev/web-build/Dockerfile` customizations
 - Interactive prompts with flag overrides for CI/scripting
-- Env-based runtime toggles for Horizon and Scheduler (`ENABLE_HORIZON`, `ENABLE_SCHEDULER`)
+- Env-based runtime toggles for Horizon, Queue Worker, and Scheduler (`ENABLE_HORIZON`, `ENABLE_QUEUE_WORKER`, `ENABLE_SCHEDULER`)
+- Redis-free queue fallback: a plain `queue:work` worker is generated alongside Horizon (`QUEUE_CONNECTION=database` + `ENABLE_QUEUE_WORKER=true`)
+- Conservative 1-core/1GB defaults (`num_threads 4`, `QUEUE_WORKER_PROCS=1`) — tune up via env
 
 ### Web Server Options
 
@@ -73,12 +75,15 @@ ddev coolify --server=nginx --no-supervisor
 
 ### Runtime Worker Toggles
 
-When using single-container mode, Horizon and Scheduler are **disabled by default** and controlled via environment variables. This prevents crash-loops when Redis isn't configured.
+When using single-container mode, workers are **disabled by default** and controlled via environment variables. This prevents crash-loops when Redis isn't configured.
 
 | Variable | Default | Description |
 |---|---|---|
 | `ENABLE_HORIZON` | `false` | Set to `true` to start Horizon (requires Redis) |
+| `ENABLE_QUEUE_WORKER` | `false` | Set to `true` to start plain `queue:work` — Redis-free fallback with `QUEUE_CONNECTION=database`. Enable ONE of Horizon/queue worker, not both |
+| `QUEUE_WORKER_PROCS` | `1` | Queue worker process count (single-container FrankenPHP only). 1-core/1GB default; raise to 2-3 on 2-core/2GB |
 | `ENABLE_SCHEDULER` | `false` | Set to `true` to start the Laravel Scheduler |
+| `FRANKENPHP_CONFIG` | `num_threads 4` | FrankenPHP thread pool. 1-core/1GB default; raise (e.g. `num_threads 8`) on bigger boxes |
 
 Set these in the Coolify UI under Environment Variables.
 
@@ -92,6 +97,8 @@ Set these in the Coolify UI under Environment Variables.
 | `docker/supervisord.conf` | FrankenPHP + Supervisor |
 | `docker/s6/horizon/run` | Nginx + S6 + Horizon detected |
 | `docker/s6/horizon/type` | Nginx + S6 + Horizon detected |
+| `docker/s6/queue-worker/run` | Nginx + S6 + queue usage detected |
+| `docker/s6/queue-worker/type` | Nginx + S6 + queue usage detected |
 | `docker/s6/scheduler/run` | Nginx + S6 + Scheduler detected |
 | `docker/s6/scheduler/type` | Nginx + S6 + Scheduler detected |
 

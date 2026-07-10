@@ -115,12 +115,20 @@ JSON
   assert_output --partial "supervisor"
   assert_output --partial "install-php-extensions exif gd"
   assert_output --partial "start.sh"
+  assert_output --partial 'ENV FRANKENPHP_CONFIG="num_threads 4"'
+  assert_output --partial 'ENV QUEUE_WORKER_PROCS="1"'
 
-  # Check supervisord has horizon + scheduler
+  # Check supervisord has horizon + queue-worker fallback + scheduler
   run cat docker/supervisord.conf
   assert_output --partial "[program:frankenphp]"
   assert_output --partial "[program:horizon]"
+  assert_output --partial "[program:queue-worker]"
+  assert_output --partial "numprocs=%(ENV_QUEUE_WORKER_PROCS)s"
   assert_output --partial "[program:scheduler]"
+
+  # start.sh starts the whole queue-worker group
+  run cat docker/start.sh
+  assert_output --partial "start 'queue-worker:*'"
 }
 
 @test "generates nginx + s6 dockerfile" {
@@ -148,6 +156,8 @@ JSON
   assert_file_exist docker/Dockerfile
   assert_file_exist docker/s6/horizon/run
   assert_file_exist docker/s6/horizon/type
+  assert_file_exist docker/s6/queue-worker/run
+  assert_file_exist docker/s6/queue-worker/type
   assert_file_exist docker/s6/scheduler/run
   assert_file_exist docker/s6/scheduler/type
   assert_file_not_exist docker/supervisord.conf
