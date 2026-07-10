@@ -60,9 +60,14 @@ _print_coolify_notes() {
         echo "    Health check:  /up"
         echo "    Processes:     Web server"
         if [[ "${HAS_HORIZON}" == "true" ]]; then
-            echo "                   Horizon (queue worker) — requires ENABLE_HORIZON=true"
-        elif [[ "${HAS_QUEUE_WORKER}" == "true" ]]; then
-            echo "                   Queue worker — requires ENABLE_QUEUE_WORKER=true"
+            echo "                   Horizon (queue worker) — requires ENABLE_HORIZON=true + Redis"
+        fi
+        if [[ "${HAS_QUEUE_WORKER}" == "true" ]]; then
+            if [[ "${HAS_HORIZON}" == "true" ]]; then
+                echo "                   Queue worker (Redis-free fallback) — requires ENABLE_QUEUE_WORKER=true"
+            else
+                echo "                   Queue worker — requires ENABLE_QUEUE_WORKER=true"
+            fi
         fi
         if [[ "${HAS_SCHEDULER}" == "true" ]]; then
             echo "                   Scheduler (cron) — requires ENABLE_SCHEDULER=true"
@@ -105,8 +110,14 @@ _print_coolify_notes() {
     if [[ "${USE_SUPERVISOR}" == "true" ]]; then
         if [[ "${HAS_HORIZON}" == "true" ]]; then
             echo "    ENABLE_HORIZON=true       — disabled by default, requires Redis"
-        elif [[ "${HAS_QUEUE_WORKER}" == "true" ]]; then
-            echo "    ENABLE_QUEUE_WORKER=true  — disabled by default"
+        fi
+        if [[ "${HAS_QUEUE_WORKER}" == "true" ]]; then
+            if [[ "${HAS_HORIZON}" == "true" ]]; then
+                echo "    ENABLE_QUEUE_WORKER=true  — disabled by default; Redis-free fallback (QUEUE_CONNECTION=database). Enable ONE of Horizon/queue worker, not both"
+            else
+                echo "    ENABLE_QUEUE_WORKER=true  — disabled by default"
+            fi
+            echo "    QUEUE_WORKER_PROCS=1      — queue worker process count (single-container FrankenPHP only)"
         fi
         if [[ "${HAS_SCHEDULER}" == "true" ]]; then
             echo "    ENABLE_SCHEDULER=true     — disabled by default"
@@ -261,13 +272,14 @@ if grep -q '"laravel/horizon"' "${COMPOSER_FILE}" 2>/dev/null; then
     HAS_REDIS=true
 fi
 
-# Detect queue usage: jobs directory, ShouldQueue implementations, or queue driver configured
-if [[ "${HAS_HORIZON}" != "true" ]]; then
-    if [[ -d "${DDEV_APPROOT}/app/Jobs" ]] \
-        || grep -rq "ShouldQueue" "${DDEV_APPROOT}/app/" 2>/dev/null \
-        || grep -qE "^QUEUE_CONNECTION=(redis|database|sqs|beanstalkd)" "${DDEV_APPROOT}/.env.example" 2>/dev/null; then
-        HAS_QUEUE_WORKER=true
-    fi
+# Detect queue usage: jobs directory, ShouldQueue implementations, or queue driver configured.
+# Horizon implies queue usage — the plain queue worker is generated alongside it as a
+# Redis-free fallback (QUEUE_CONNECTION=database + ENABLE_QUEUE_WORKER=true).
+if [[ "${HAS_HORIZON}" == "true" ]] \
+    || [[ -d "${DDEV_APPROOT}/app/Jobs" ]] \
+    || grep -rq "ShouldQueue" "${DDEV_APPROOT}/app/" 2>/dev/null \
+    || grep -qE "^QUEUE_CONNECTION=(redis|database|sqs|beanstalkd)" "${DDEV_APPROOT}/.env.example" 2>/dev/null; then
+    HAS_QUEUE_WORKER=true
 fi
 
 if [[ -d "${DDEV_APPROOT}/app/Console" ]] || grep -rq "schedule" "${DDEV_APPROOT}/routes/console.php" 2>/dev/null; then
@@ -396,7 +408,8 @@ fi
 sleep 5
 exec php /var/www/html/artisan horizon'
             S6_HORIZON_TYPE="longrun"
-        elif [[ "${HAS_QUEUE_WORKER}" == "true" ]]; then
+        fi
+        if [[ "${HAS_QUEUE_WORKER}" == "true" ]]; then
             S6_QUEUE_WORKER_RUN='#!/bin/sh
 if [ "$ENABLE_QUEUE_WORKER" != "true" ]; then
     echo "Queue worker disabled (set ENABLE_QUEUE_WORKER=true to enable)"
@@ -453,8 +466,8 @@ if [ "${ENABLE_HORIZON:-false}" = "true" ]; then
 fi
 
 if [ "${ENABLE_QUEUE_WORKER:-false}" = "true" ]; then
-    echo "▶ Starting Queue Worker (ENABLE_QUEUE_WORKER=true)..."
-    supervisorctl -c /etc/supervisor/conf.d/supervisord.conf start queue-worker || true
+    echo "▶ Starting Queue Worker x${QUEUE_WORKER_PROCS:-1} (ENABLE_QUEUE_WORKER=true)..."
+    supervisorctl -c /etc/supervisor/conf.d/supervisord.conf start '"'"'queue-worker:*'"'"' || true
 fi
 
 if [ "${ENABLE_SCHEDULER:-false}" = "true" ]; then
@@ -504,11 +517,15 @@ priority=20
 startsecs=5
 stopwaitsecs=30
 stopsignal=SIGTERM"
-        elif [[ "${HAS_QUEUE_WORKER}" == "true" ]]; then
+        fi
+
+        if [[ "${HAS_QUEUE_WORKER}" == "true" ]]; then
             SUPERVISOR_CONTENT="${SUPERVISOR_CONTENT}
 
 [program:queue-worker]
 command=php /var/www/html/artisan queue:work --sleep=3 --tries=3 --max-time=3600
+process_name=%(program_name)s_%(process_num)02d
+numprocs=%(ENV_QUEUE_WORKER_PROCS)s
 stdout_logfile=/dev/stdout
 stdout_logfile_maxbytes=0
 stderr_logfile=/dev/stderr
@@ -590,7 +607,8 @@ COPY --chmod=755 docker/start.sh /usr/local/bin/start.sh"
 COPY --chmod=755 docker/s6/horizon/run /etc/s6-overlay/s6-rc.d/horizon/run
 COPY docker/s6/horizon/type /etc/s6-overlay/s6-rc.d/horizon/type
 RUN touch /etc/s6-overlay/s6-rc.d/user/contents.d/horizon"
-        elif [[ "${HAS_QUEUE_WORKER}" == "true" ]]; then
+        fi
+        if [[ "${HAS_QUEUE_WORKER}" == "true" ]]; then
             PROCESS_CONFIG="${PROCESS_CONFIG}
 
 # S6 service: Queue worker
@@ -626,11 +644,31 @@ ENV CADDY_SERVER_ROOT=\"/var/www/html/public\"
 ENV CADDY_HTTP_PORT=\"8080\"
 ENV CADDY_HTTPS_PORT=\"8443\"
 ENV SSL_MODE=\"off\"
-ENV HEALTHCHECK_PATH=\"/up\""
+ENV HEALTHCHECK_PATH=\"/up\"
+
+# FrankenPHP thread pool. The base image's Caddyfile injects this into its
+# frankenphp{} block. Default without it = 2x CPU (only 2 on a 1-core VPS),
+# which stalls the whole site when a few slow external calls pile up.
+# Requests are typically I/O-bound, so 4 threads is safe on 1GB/1-core;
+# raise via env on bigger boxes (e.g. 8 on 2GB/2-core).
+ENV FRANKENPHP_CONFIG=\"num_threads 4\""
 else
     SERVER_ENV="# Nginx
 ENV SSL_MODE=\"off\"
 ENV HEALTHCHECK_PATH=\"/up\""
+fi
+
+# ── Build worker ENV section ──────────────────────────────────────────────────
+# supervisord's numprocs=%(ENV_QUEUE_WORKER_PROCS)s requires the variable to
+# exist at supervisord start — the Dockerfile ENV guarantees a default.
+WORKER_ENV=""
+if [[ "${USE_SUPERVISOR}" == "true" && "${SERVER}" == "frankenphp" && "${HAS_QUEUE_WORKER}" == "true" ]]; then
+    WORKER_ENV="
+
+# Queue worker process count (supervisord numprocs). Set the SAME name in
+# Coolify to override (no ENV_ prefix — that's supervisord conf syntax only).
+# 1-core/1GB VPS default: 1. Raise to 2-3 on 2-core/2GB.
+ENV QUEUE_WORKER_PROCS=\"1\""
 fi
 
 # ── Header comment ────────────────────────────────────────────────────────────
@@ -748,7 +786,7 @@ ${SERVER_ENV}
 # PHP tuning
 ENV PHP_OPCACHE_ENABLE=\"1\"
 ENV PHP_MEMORY_LIMIT=\"256M\"
-ENV PHP_MAX_EXECUTION_TIME=\"60\"
+ENV PHP_MAX_EXECUTION_TIME=\"60\"${WORKER_ENV}
 
 # Laravel AUTORUN (runs on container start)
 ENV AUTORUN_ENABLED=\"true\"
