@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+#ddev-generated
 
 ## Description: Generate a production Dockerfile for Coolify deployment (ServerSideUp)
 ## Usage: coolify [flags]
