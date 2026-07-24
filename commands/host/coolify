@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+#ddev-generated
 
 ## Description: Generate a production Dockerfile for Coolify deployment (ServerSideUp)
 ## Usage: coolify [flags]
@@ -449,10 +450,13 @@ echo "🚀 Starting Supervisor (FrankenPHP + workers)..."
 /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf &
 SUPERVISORD_PID=$!
 
-# Wait for supervisord socket to be ready
+# Wait for supervisord socket to be ready. Probe with 'pid', not 'status':
+# 'status' exits non-zero while any program is STOPPED, which is always the
+# case here because the workers are autostart=false — that would burn every
+# retry and delay worker startup by the full timeout.
 RETRIES=0
 while [ $RETRIES -lt 30 ]; do
-    if supervisorctl -c /etc/supervisor/conf.d/supervisord.conf status >/dev/null 2>&1; then
+    if supervisorctl -c /etc/supervisor/conf.d/supervisord.conf pid >/dev/null 2>&1; then
         break
     fi
     RETRIES=$((RETRIES + 1))
@@ -693,7 +697,11 @@ fi
 
 WAYFINDER_STAGE=""
 WAYFINDER_FRONTEND_COPY=""
+NPM_BUILD_ENV=""
 if [[ "${HAS_WAYFINDER}" == "true" ]]; then
+    # Wayfinder files are pre-generated in the composer stage; the vite plugin
+    # would re-run `php artisan` which does not exist in the node stage.
+    NPM_BUILD_ENV="SKIP_WAYFINDER=1 "
     WAYFINDER_STAGE="# ─── Stage 1: Wayfinder generation ──────────────────────────────────────────
 FROM composer:2 AS wayfinder
 
@@ -746,7 +754,7 @@ RUN npm ci --frozen-lockfile
 
 COPY . .
 COPY --from=vendor /app/vendor /app/vendor
-${WAYFINDER_FRONTEND_COPY}RUN npm run build
+${WAYFINDER_FRONTEND_COPY}RUN ${NPM_BUILD_ENV}npm run build
 
 # ─── Stage: Production image ─────────────────────────────────────────────────
 FROM ${BASE_IMAGE} AS production
