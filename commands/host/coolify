@@ -693,7 +693,11 @@ fi
 
 WAYFINDER_STAGE=""
 WAYFINDER_FRONTEND_COPY=""
+NPM_BUILD_ENV=""
 if [[ "${HAS_WAYFINDER}" == "true" ]]; then
+    # Wayfinder files are pre-generated in the composer stage; the vite plugin
+    # would re-run `php artisan` which does not exist in the node stage.
+    NPM_BUILD_ENV="SKIP_WAYFINDER=1 "
     WAYFINDER_STAGE="# ─── Stage 1: Wayfinder generation ──────────────────────────────────────────
 FROM composer:2 AS wayfinder
 
@@ -746,7 +750,7 @@ RUN npm ci --frozen-lockfile
 
 COPY . .
 COPY --from=vendor /app/vendor /app/vendor
-${WAYFINDER_FRONTEND_COPY}RUN npm run build
+${WAYFINDER_FRONTEND_COPY}RUN ${NPM_BUILD_ENV}npm run build
 
 # ─── Stage: Production image ─────────────────────────────────────────────────
 FROM ${BASE_IMAGE} AS production
