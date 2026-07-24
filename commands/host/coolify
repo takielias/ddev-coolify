@@ -450,8 +450,8 @@ echo "🚀 Starting Supervisor (FrankenPHP + workers)..."
 /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf &
 SUPERVISORD_PID=$!
 
-# Wait for supervisord socket to be ready. Probe with \`pid\`, not \`status\`:
-# \`status\` exits non-zero while any program is STOPPED, which is always the
+# Wait for supervisord socket to be ready. Probe with 'pid', not 'status':
+# 'status' exits non-zero while any program is STOPPED, which is always the
 # case here because the workers are autostart=false — that would burn every
 # retry and delay worker startup by the full timeout.
 RETRIES=0
