@@ -103,6 +103,10 @@ Besides `.env` and `.env.*` (with `.env.example` kept), the generated `.dockerig
 
 Provide credentials and keys at runtime through Coolify environment variables or volumes instead.
 
+### Startup
+
+In FrankenPHP single-container mode, the ServerSideUp entrypoint runs the startup scripts (including `AUTORUN` migrations) once, before `docker/start.sh`. `start.sh` does not run them again. If a script fails, for example a migration, the container exits before Supervisor and the workers start.
+
 
 ## Generated Files
 

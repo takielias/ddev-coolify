@@ -453,15 +453,8 @@ exec php /var/www/html/artisan schedule:work'
         STARTUP_CONTENT='#!/bin/sh
 set -e
 
-# Run ServerSideUp entrypoint scripts (container info, SSL, Laravel automations)
-if [ -d /etc/entrypoint.d ]; then
-    for script in /etc/entrypoint.d/*.sh; do
-        if [ -x "$script" ]; then
-            echo "▶ Running $(basename $script)..."
-            "$script" || true
-        fi
-    done
-fi
+# The image entrypoint has already run the ServerSideUp startup scripts (container
+# info, SSL, Laravel automations) and aborted the container if one failed.
 
 echo "🚀 Starting Supervisor (FrankenPHP + workers)..."
 /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf &
@@ -652,7 +645,7 @@ fi
 CMD_LINE=""
 if [[ "${USE_SUPERVISOR}" == "true" && "${SERVER}" == "frankenphp" ]]; then
     CMD_LINE='
-# Start: runs entrypoint scripts (AUTORUN) then supervisor (FrankenPHP + workers)
+# Start: supervisor (FrankenPHP + workers), after the image entrypoint has run AUTORUN
 CMD ["/usr/local/bin/start.sh"]'
 fi
 # nginx uses default CMD (S6 manages everything), frankenphp without supervisor uses default CMD too

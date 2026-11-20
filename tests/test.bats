@@ -277,6 +277,35 @@ JSON
   done
 }
 
+@test "start.sh does not rerun entrypoint scripts" {
+  set -eu -o pipefail
+  run ddev add-on get "${DIR}"
+  assert_success
+  run ddev start -y
+  assert_success
+
+  cat > composer.json <<'JSON'
+{
+  "require": {
+    "laravel/horizon": "^5.0"
+  }
+}
+JSON
+  mkdir -p app/Console
+
+  run ddev coolify --server=frankenphp --supervisor --force
+  assert_success
+
+  run cat docker/start.sh
+  refute_output --partial "/etc/entrypoint.d"
+  refute_output --partial '"$script" || true'
+  assert_output --partial "/usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf &"
+  assert_output --partial "start horizon || true"
+  assert_output --partial "start 'queue-worker:*' || true"
+  assert_output --partial "start scheduler || true"
+  assert_output --partial 'wait $SUPERVISORD_PID'
+}
+
 @test "warns about local files excluded from the image" {
   set -eu -o pipefail
   run ddev add-on get "${DIR}"
