@@ -783,26 +783,42 @@ ${ROOT_INSTALL}
 ${EXTENSIONS_LINE:+
 ${EXTENSIONS_LINE}}${WEB_BUILD_SECTION}${PROCESS_CONFIG}
 
-USER www-data
-
-# Copy only what Laravel needs at runtime
-COPY --chown=www-data:www-data app/             /var/www/html/app/
-COPY --chown=www-data:www-data bootstrap/app.php /var/www/html/bootstrap/app.php
-COPY --chown=www-data:www-data bootstrap/providers.php /var/www/html/bootstrap/providers.php
-RUN mkdir -p /var/www/html/bootstrap/cache && chown www-data:www-data /var/www/html/bootstrap/cache
-COPY --chown=www-data:www-data config/          /var/www/html/config/
+# Copy only what Laravel needs at runtime.
+# Ownership model: code under app/, config/, routes/, resources/views/,
+# bootstrap/, vendor/ and the root files is owned by root and read-only for the
+# web process. storage/ and bootstrap/cache/ are owned by www-data. public/ and
+# database/ also stay owned by www-data for compatibility (storage link,
+# runtime-written public files, SQLite), so files in them, including
+# public/index.php and migrations, can still be modified by the web process.
+COPY app/             /var/www/html/app/
+COPY bootstrap/app.php /var/www/html/bootstrap/app.php
+COPY bootstrap/providers.php /var/www/html/bootstrap/providers.php
+COPY config/          /var/www/html/config/
 COPY --chown=www-data:www-data database/        /var/www/html/database/
 COPY --chown=www-data:www-data public/          /var/www/html/public/
-COPY --chown=www-data:www-data resources/views/ /var/www/html/resources/views/
-COPY --chown=www-data:www-data routes/          /var/www/html/routes/
+COPY resources/views/ /var/www/html/resources/views/
+COPY routes/          /var/www/html/routes/
 COPY --chown=www-data:www-data storage/         /var/www/html/storage/
-COPY --chown=www-data:www-data artisan composer.json composer.lock /var/www/html/
+COPY artisan composer.json composer.lock /var/www/html/
 
 # Copy PHP dependencies from vendor stage
-COPY --from=vendor --chown=www-data:www-data /app/vendor /var/www/html/vendor
+COPY --from=vendor /app/vendor /var/www/html/vendor
 
 # Copy built frontend assets from frontend stage
 COPY --from=frontend --chown=www-data:www-data /app/public/build /var/www/html/public/build
+
+# Writable bootstrap/cache; root-owned app root (so app/ cannot be swapped out);
+# /var/www (www-data's HOME) becomes root:www-data with the sticky bit, so
+# www-data can still create its own files there but cannot rename or delete html/;
+# make code readable even when the build context had restrictive file modes
+RUN mkdir -p /var/www/html/bootstrap/cache \\
+    && chown www-data:www-data /var/www/html/bootstrap/cache \\
+    && chown root:root /var/www/html \\
+    && chown root:www-data /var/www && chmod 1775 /var/www \\
+    && cd /var/www/html \\
+    && find app bootstrap config resources routes artisan composer.json composer.lock \\( ! -perm -o=r -o -type d ! -perm -o=x \\) -exec chmod o+rX {} +
+
+USER www-data
 
 # ─── Runtime configuration ────────────────────────────────────────────────────
 ${SERVER_ENV}

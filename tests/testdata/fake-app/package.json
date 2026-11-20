@@ -1,0 +1,8 @@
+{
+  "name": "fake-app",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "node -e \"const fs = require('fs'); fs.mkdirSync('public/build', { recursive: true }); fs.writeFileSync('public/build/manifest.json', '{}');\""
+  }
+}

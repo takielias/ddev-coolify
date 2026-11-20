@@ -87,6 +87,7 @@ When using single-container mode, workers are **disabled by default** and contro
 | `FRANKENPHP_CONFIG` | `num_threads 4` | FrankenPHP thread pool. 1-core/1GB default; raise (e.g. `num_threads 8`) on bigger boxes |
 
 Set these in the Coolify UI under Environment Variables.
+
 ## Security Defaults
 
 The generated files keep local credentials out of the image and keep most application code read-only at runtime (see [File ownership](#file-ownership) for the writable exceptions).
@@ -103,6 +104,21 @@ Besides `.env` and `.env.*` (with `.env.example` kept), the generated `.dockerig
 | `storage/app/private/*` | Local private uploads |
 
 Provide credentials and keys at runtime through Coolify environment variables or volumes instead.
+
+### File ownership
+
+The production image runs as `www-data`. Code under `app/`, `config/`, `routes/`, `resources/views/`, `bootstrap/` and `vendor/`, plus the root files, is owned by `root`, so the web process cannot modify it. `public/` and `database/` remain writable for compatibility (storage link, runtime-written public files, SQLite). This means files in them, including `public/index.php` and migrations, can still be modified by the web process.
+
+| Path | Owner | Reason |
+|---|---|---|
+| `app/`, `config/`, `routes/`, `resources/views/`, `bootstrap/app.php`, `bootstrap/providers.php`, `artisan`, `composer.json`, `composer.lock`, `vendor/` | `root` (read-only) | Code only changes with a new image |
+| `/var/www/html` itself | `root` | Prevents renaming or replacing the code directories |
+| `/var/www` (parent of the app root, `www-data`'s home) | `root:www-data`, mode `1775` | The sticky bit lets `www-data` create its own files there but not rename or delete `html/` |
+| `storage/`, `bootstrap/cache/` | `www-data` | Logs, sessions, compiled views and the config/route cache written by `AUTORUN` |
+| `public/` | `www-data` (writable, including `index.php`) | `artisan storage:link` creates `public/storage` on start, and some apps write files there at runtime |
+| `database/` | `www-data` (writable, including migrations) | SQLite databases must be writable, including the directory for journal files |
+
+The build also adds world-read permission to code files that lack it, and world-traverse permission to code directories that lack it, so a checkout made with a restrictive umask still works.
 
 ### Startup
 
