@@ -174,6 +174,12 @@ JSON
   assert_output --partial "serversideup/php:8.4-fpm-nginx"
   assert_output --partial "s6-overlay"
 
+  # Services join the S6 user bundle in whichever location the base image has
+  refute_output --partial "RUN touch /etc/s6-overlay/s6-rc.d/user/contents.d/"
+  for service in horizon queue-worker scheduler; do
+    assert_output --partial "RUN d=/etc/s6-overlay/user-bundles.d/user/contents.d; [ -d \"\$d\" ] || d=/etc/s6-overlay/s6-rc.d/user/contents.d; mkdir -p \"\$d\" && touch \"\$d/${service}\""
+  done
+
   # Check S6 service type
   run cat docker/s6/horizon/type
   assert_output --partial "longrun"

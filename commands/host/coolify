@@ -612,6 +612,13 @@ RUN apt-get update \\
 fi
 
 # ── Build the process config section ──────────────────────────────────────────
+# Dockerfile line that adds an S6 service to the "user" bundle. ServerSideUp v5
+# images (s6-overlay 3.2.3) keep the bundle in user-bundles.d; older images keep
+# it in s6-rc.d. Pick whichever the base image has.
+_s6_enable_service() {
+    echo "RUN d=/etc/s6-overlay/user-bundles.d/user/contents.d; [ -d \"\$d\" ] || d=/etc/s6-overlay/s6-rc.d/user/contents.d; mkdir -p \"\$d\" && touch \"\$d/$1\""
+}
+
 PROCESS_CONFIG=""
 if [[ "${USE_SUPERVISOR}" == "true" ]]; then
     if [[ "${SERVER}" == "frankenphp" ]]; then
@@ -626,7 +633,7 @@ COPY --chmod=755 docker/start.sh /usr/local/bin/start.sh"
 # S6 service: Horizon (queue worker)
 COPY --chmod=755 docker/s6/horizon/run /etc/s6-overlay/s6-rc.d/horizon/run
 COPY docker/s6/horizon/type /etc/s6-overlay/s6-rc.d/horizon/type
-RUN touch /etc/s6-overlay/s6-rc.d/user/contents.d/horizon"
+$(_s6_enable_service horizon)"
         fi
         if [[ "${HAS_QUEUE_WORKER}" == "true" ]]; then
             PROCESS_CONFIG="${PROCESS_CONFIG}
@@ -634,7 +641,7 @@ RUN touch /etc/s6-overlay/s6-rc.d/user/contents.d/horizon"
 # S6 service: Queue worker
 COPY --chmod=755 docker/s6/queue-worker/run /etc/s6-overlay/s6-rc.d/queue-worker/run
 COPY docker/s6/queue-worker/type /etc/s6-overlay/s6-rc.d/queue-worker/type
-RUN touch /etc/s6-overlay/s6-rc.d/user/contents.d/queue-worker"
+$(_s6_enable_service queue-worker)"
         fi
         if [[ "${HAS_SCHEDULER}" == "true" ]]; then
             PROCESS_CONFIG="${PROCESS_CONFIG}
@@ -642,7 +649,7 @@ RUN touch /etc/s6-overlay/s6-rc.d/user/contents.d/queue-worker"
 # S6 service: Scheduler
 COPY --chmod=755 docker/s6/scheduler/run /etc/s6-overlay/s6-rc.d/scheduler/run
 COPY docker/s6/scheduler/type /etc/s6-overlay/s6-rc.d/scheduler/type
-RUN touch /etc/s6-overlay/s6-rc.d/user/contents.d/scheduler"
+$(_s6_enable_service scheduler)"
         fi
     fi
 fi
