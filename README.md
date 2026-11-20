@@ -44,6 +44,7 @@ ddev coolify --server=nginx --no-supervisor
 | `--dry-run`, `-n` | Preview without writing files |
 | `--force`, `-f` | Overwrite existing files |
 | `--output`, `-o` | Custom output directory |
+| `--web-build` | Include `.ddev/web-build/Dockerfile` commands in the production image |
 
 ## Features
 
@@ -53,7 +54,7 @@ ddev coolify --server=nginx --no-supervisor
 - Auto-detects Horizon, Scheduler, Redis, and Wayfinder requirements
 - Includes database client tools (`mysqldump`/`pg_dump`) for backups and debugging
 - Auto-generates Wayfinder routes/actions in a dedicated build stage when `laravel/wayfinder` is detected
-- Carries over `.ddev/web-build/Dockerfile` customizations
+- Carries over `.ddev/web-build/Dockerfile` customizations when `--web-build` is passed
 - Interactive prompts with flag overrides for CI/scripting
 - Env-based runtime toggles for Horizon, Queue Worker, and Scheduler (`ENABLE_HORIZON`, `ENABLE_QUEUE_WORKER`, `ENABLE_SCHEDULER`)
 - Redis-free queue fallback: a plain `queue:work` worker is generated alongside Horizon (`QUEUE_CONNECTION=database` + `ENABLE_QUEUE_WORKER=true`)
@@ -107,6 +108,9 @@ Provide credentials and keys at runtime through Coolify environment variables or
 
 In FrankenPHP single-container mode, the ServerSideUp entrypoint runs the startup scripts (including `AUTORUN` migrations) once, before `docker/start.sh`. `start.sh` does not run them again. If a script fails, for example a migration, the container exits before Supervisor and the workers start.
 
+### Web-build customizations
+
+Commands in `.ddev/web-build/Dockerfile` run as `root` in the production image, so they are no longer copied by default. When the file has commands, `ddev coolify` prints a warning that they were not included. Pass `--web-build` to include them.
 
 ## Generated Files
 

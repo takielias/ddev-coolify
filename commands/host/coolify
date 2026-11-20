@@ -4,7 +4,7 @@
 ## Description: Generate a production Dockerfile for Coolify deployment (ServerSideUp)
 ## Usage: coolify [flags]
 ## Example: "ddev coolify\nddev coolify --server=frankenphp --supervisor\nddev coolify --dry-run"
-## Flags: [{"Name":"output","Shorthand":"o","Type":"string","DefValue":".","Usage":"output directory for generated files"},{"Name":"dry-run","Shorthand":"n","Usage":"preview what would be generated without writing files"},{"Name":"force","Shorthand":"f","Usage":"overwrite existing files without prompting"},{"Name":"server","Shorthand":"s","Type":"string","Usage":"web server: frankenphp or nginx (skips prompt)"},{"Name":"supervisor","Usage":"enable supervisor/S6 for single-container mode (skips prompt)"},{"Name":"no-supervisor","Usage":"disable supervisor for multi-container mode (skips prompt)"}]
+## Flags: [{"Name":"output","Shorthand":"o","Type":"string","DefValue":".","Usage":"output directory for generated files"},{"Name":"dry-run","Shorthand":"n","Usage":"preview what would be generated without writing files"},{"Name":"force","Shorthand":"f","Usage":"overwrite existing files without prompting"},{"Name":"server","Shorthand":"s","Type":"string","Usage":"web server: frankenphp or nginx (skips prompt)"},{"Name":"supervisor","Usage":"enable supervisor/S6 for single-container mode (skips prompt)"},{"Name":"no-supervisor","Usage":"disable supervisor for multi-container mode (skips prompt)"},{"Name":"web-build","Usage":"include .ddev/web-build/Dockerfile commands in the production image (run as root)"}]
 
 set -eo pipefail
 
@@ -136,6 +136,7 @@ DRY_RUN=false
 FORCE=false
 SERVER=""
 USE_SUPERVISOR=""
+USE_WEB_BUILD=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -146,6 +147,7 @@ while [[ $# -gt 0 ]]; do
         --server=*)          SERVER="${1#*=}"; shift ;;
         --supervisor)        USE_SUPERVISOR=true; shift ;;
         --no-supervisor)     USE_SUPERVISOR=false; shift ;;
+        --web-build)         USE_WEB_BUILD=true; shift ;;
         *)                   shift ;;
     esac
 done
@@ -312,7 +314,11 @@ if [[ -f "${WEB_BUILD_FILE}" ]]; then
 fi
 
 if [[ -n "${WEB_BUILD_COMMANDS}" ]]; then
-    echo -e "  ${YELLOW}Found .ddev/web-build/Dockerfile customizations — will include${NC}"
+    if [[ "${USE_WEB_BUILD}" == "true" ]]; then
+        echo -e "  ${YELLOW}Found .ddev/web-build/Dockerfile customizations — will include${NC}"
+    else
+        warn "Found .ddev/web-build/Dockerfile customizations — NOT included in the production image (rerun with --web-build to include them)"
+    fi
 fi
 
 # ─── Warn about local files the .dockerignore keeps out of the image ─────────
@@ -574,7 +580,7 @@ if [[ ${#EXTENSIONS[@]} -gt 0 ]]; then
 fi
 
 WEB_BUILD_SECTION=""
-if [[ -n "${WEB_BUILD_COMMANDS}" ]]; then
+if [[ -n "${WEB_BUILD_COMMANDS}" && "${USE_WEB_BUILD}" == "true" ]]; then
     WEB_BUILD_SECTION="
 # Carried over from .ddev/web-build/Dockerfile
 ${WEB_BUILD_COMMANDS}

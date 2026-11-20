@@ -306,6 +306,33 @@ JSON
   assert_output --partial 'wait $SUPERVISORD_PID'
 }
 
+@test "web-build customizations are opt-in" {
+  set -eu -o pipefail
+  run ddev add-on get "${DIR}"
+  assert_success
+  run ddev start -y
+  assert_success
+
+  # Created after start so ddev does not rebuild the web image with it
+  mkdir -p .ddev/web-build
+  printf '%s\n' '# custom build step' 'RUN echo carried-marker' > .ddev/web-build/Dockerfile
+
+  run ddev coolify --server=frankenphp --supervisor --force
+  assert_success
+  assert_output --partial -- "--web-build"
+  assert_output --partial "NOT included"
+  run cat docker/Dockerfile
+  refute_output --partial "carried-marker"
+  refute_output --partial "Carried over from .ddev/web-build/Dockerfile"
+
+  run ddev coolify --server=frankenphp --supervisor --web-build --force
+  assert_success
+  refute_output --partial "NOT included"
+  run cat docker/Dockerfile
+  assert_output --partial "# Carried over from .ddev/web-build/Dockerfile
+RUN echo carried-marker"
+}
+
 @test "warns about local files excluded from the image" {
   set -eu -o pipefail
   run ddev add-on get "${DIR}"
