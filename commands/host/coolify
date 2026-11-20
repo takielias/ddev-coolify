@@ -315,6 +315,17 @@ if [[ -n "${WEB_BUILD_COMMANDS}" ]]; then
     echo -e "  ${YELLOW}Found .ddev/web-build/Dockerfile customizations — will include${NC}"
 fi
 
+# ─── Warn about local files the .dockerignore keeps out of the image ─────────
+if compgen -G "${DDEV_APPROOT}/storage/*.key" >/dev/null; then
+    warn "Found storage/*.key — keys are excluded from the image and must be provided at runtime (Passport: PASSPORT_PRIVATE_KEY / PASSPORT_PUBLIC_KEY env vars, or a volume)"
+fi
+if compgen -G "${DDEV_APPROOT}/database/*.sqlite*" >/dev/null; then
+    warn "Found database/*.sqlite* — local SQLite files are excluded from the image; the database is created by migrations at first start (use a volume on database/ to persist it)"
+fi
+if [[ -n "$(find "${DDEV_APPROOT}/storage/app/private" -mindepth 1 ! -type d ! -path "${DDEV_APPROOT}/storage/app/private/.gitignore" -print -quit 2>/dev/null || true)" ]]; then
+    warn "Found files in storage/app/private/ — they are excluded from the image"
+fi
+
 # ─── Determine base image ────────────────────────────────────────────────────
 if [[ "${SERVER}" == "nginx" ]]; then
     BASE_IMAGE="serversideup/php:${PHP_VERSION}-fpm-nginx"
@@ -355,6 +366,12 @@ storage/framework/cache/data/*
 storage/framework/sessions/*
 storage/framework/views/*
 storage/app/public/*
+
+# ─── Local secrets & data (never bake into the image) ─────────────────────────
+auth.json
+database/*.sqlite*
+storage/*.key
+storage/app/private/*
 
 # ─── Tests & QA ───────────────────────────────────────────────────────────────
 tests/

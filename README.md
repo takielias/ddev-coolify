@@ -86,6 +86,23 @@ When using single-container mode, workers are **disabled by default** and contro
 | `FRANKENPHP_CONFIG` | `num_threads 4` | FrankenPHP thread pool. 1-core/1GB default; raise (e.g. `num_threads 8`) on bigger boxes |
 
 Set these in the Coolify UI under Environment Variables.
+## Security Defaults
+
+The generated files keep local credentials out of the image and keep most application code read-only at runtime (see [File ownership](#file-ownership) for the writable exceptions).
+
+### Excluded from the build context
+
+Besides `.env` and `.env.*` (with `.env.example` kept), the generated `.dockerignore` excludes:
+
+| Entry | Why |
+|---|---|
+| `auth.json` | Composer credentials for private repositories |
+| `database/*.sqlite*` | Local SQLite databases and their journal files |
+| `storage/*.key` | Passport and other OAuth key pairs |
+| `storage/app/private/*` | Local private uploads |
+
+Provide credentials and keys at runtime through Coolify environment variables or volumes instead.
+
 
 ## Generated Files
 

@@ -258,3 +258,50 @@ JSON
   run cat docker/Dockerfile
   assert_output --partial "node:20-alpine"
 }
+
+@test "dockerignore excludes credentials and local data" {
+  set -eu -o pipefail
+  run ddev add-on get "${DIR}"
+  assert_success
+  run ddev start -y
+  assert_success
+
+  run ddev coolify --server=frankenphp --supervisor --force
+  assert_success
+
+  assert_file_exist .dockerignore
+  for entry in "auth.json" "database/*.sqlite*" "storage/*.key" "storage/app/private/*" \
+    ".env" ".env.*" "!.env.example" "storage/app/public/*"; do
+    run grep -Fx -- "${entry}" .dockerignore
+    assert_success
+  done
+}
+
+@test "warns about local files excluded from the image" {
+  set -eu -o pipefail
+  run ddev add-on get "${DIR}"
+  assert_success
+  run ddev start -y
+  assert_success
+
+  mkdir -p storage/app/private
+  echo 'dummy key' > storage/oauth-private.key
+  touch database/database.sqlite
+  echo 'dummy' > storage/app/private/x.txt
+
+  run ddev coolify --server=frankenphp --supervisor --force
+  assert_success
+  assert_output --partial "Found storage/*.key"
+  assert_output --partial "PASSPORT_PRIVATE_KEY"
+  assert_output --partial "Found database/*.sqlite*"
+  assert_output --partial "Found files in storage/app/private/"
+
+  rm storage/oauth-private.key database/database.sqlite storage/app/private/x.txt
+  echo '*' > storage/app/private/.gitignore
+
+  run ddev coolify --server=frankenphp --supervisor --force
+  assert_success
+  refute_output --partial "Found storage/*.key"
+  refute_output --partial "Found database/*.sqlite*"
+  refute_output --partial "Found files in storage/app/private/"
+}
