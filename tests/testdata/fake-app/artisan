@@ -1,0 +1,11 @@
+<?php
+// Fake artisan used by the docker-build test: no real Laravel needed.
+$command = $argv[1] ?? '';
+if ($command === '--version') {
+    echo "Laravel Framework 12.0.0\n";
+    exit(0);
+}
+if ($command === 'migrate') {
+    exit((int) (getenv('FAKE_MIGRATE_EXIT') ?: 0));
+}
+exit(0);
